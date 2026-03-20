@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from MainWindow import MainWindow
+from TkMainWindow import TkMainWindow
 
 
 class App:
@@ -18,8 +19,12 @@ class App:
     def CreateMainWindow(self) -> MainWindow:
         return MainWindow(settings_path=self.settings_path, message_handler=self.message_handler)
 
+    def CreateUI(self) -> TkMainWindow:
+        return TkMainWindow(settings_path=self.settings_path)
+
+    def Run(self) -> None:
+        self.CreateUI().run()
+
 
 if __name__ == "__main__":
-    app = App()
-    window = app.CreateMainWindow()
-    print(f"MainWindow initialized. Settings path: {window.sett.settings_path}")
+    App().Run()

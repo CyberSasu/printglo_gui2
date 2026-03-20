@@ -38,14 +38,31 @@ class ComModel:
         self._isTuning: bool = False
 
         self.isTuning = False
-        self.Ports = self._get_port_names()
-        if len(self.Ports) > 0:
-            self.selectedPort = self.Ports[0]
+        ports, selected_port = self._get_available_ports()
+        self.Ports = ports
+        if selected_port is not None:
+            self.selectedPort = selected_port
 
-    def _get_port_names(self) -> list[str]:
+    def _get_available_ports(self) -> tuple[list[str], str | None]:
         if list_ports is None:
-            return []
-        return [port.device for port in list_ports.comports()]
+            return [], None
+
+        ports = list(list_ports.comports())
+        port_names = [port.device for port in ports]
+        selected_port = self._pick_default_port(ports)
+        return port_names, selected_port
+
+    @staticmethod
+    def _pick_default_port(ports: list[Any]) -> str | None:
+        if not ports:
+            return None
+
+        def port_score(port: Any) -> int:
+            text = f"{getattr(port, 'device', '')} {getattr(port, 'description', '')} {getattr(port, 'hwid', '')}".lower()
+            keywords = ("usb", "serial", "uart", "ch340", "cp210", "ftdi", "arduino", "esp")
+            return sum(1 for keyword in keywords if keyword in text)
+
+        return max(ports, key=port_score).device
 
     @property
     def Ports(self) -> list[str]:

@@ -78,6 +78,9 @@ class ComViewModel:
         self.uiSentQueue: queue.Queue[str] = queue.Queue()
 
         self.message_handler = message_handler or self._default_message_handler
+        self.last_connect_error: str | None = None
+        self.active_baudrate: int | None = None
+        self._startup_messages: list[str] = []
 
         self._Setting = sm
         self._comModel = ComModel()
@@ -121,7 +124,9 @@ class ComViewModel:
         if list_ports is None:
             self.comModel.Ports = []
             return
-        self.comModel.Ports = [port.device for port in list_ports.comports()]
+        ports = list(list_ports.comports())
+        self.comModel.Ports = [port.device for port in ports]
+        self.comModel.selectedPort = self._choose_port(ports, self.comModel.selectedPort)
 
     def SetInitialConnectState(self) -> None:
         self.comModel.OpRun = False
@@ -144,7 +149,8 @@ class ComViewModel:
         if not self.ConnectBoard():
             self.comModel.printerConnected = False
             self.serialPort = None
-            self.message_handler("Printer failed to connect")
+            detail = f": {self.last_connect_error}" if self.last_connect_error else ""
+            self.message_handler(f"Printer failed to connect to {self.comModel.selectedPort}{detail}")
             return False
 
         self.StartCommunication()
@@ -152,34 +158,50 @@ class ComViewModel:
 
     def ConnectBoard(self) -> bool:
         if serial is None:
+            self.last_connect_error = "pyserial is not installed"
             return False
 
-        try:
-            self.serialPort = serial.Serial(
-                port=self.comModel.selectedPort,
-                baudrate=250000,
-                parity=serial.PARITY_NONE,
-                stopbits=serial.STOPBITS_ONE,
-                bytesize=serial.EIGHTBITS,
-                timeout=0,
-                write_timeout=0.5,
-                xonxoff=False,
-                rtscts=False,
-                dsrdtr=False,
-            )
-            self.serialPort.dtr = True
-            self.serialPort.rts = True
-            self.serialPort.reset_input_buffer()
-            self.serialPort.reset_output_buffer()
+        self.last_connect_error = None
+        self._startup_messages = []
+        for baudrate in self._candidate_baudrates():
+            try:
+                port = serial.Serial(
+                    port=self.comModel.selectedPort,
+                    baudrate=baudrate,
+                    parity=serial.PARITY_NONE,
+                    stopbits=serial.STOPBITS_ONE,
+                    bytesize=serial.EIGHTBITS,
+                    timeout=0.2,
+                    write_timeout=0.5,
+                    xonxoff=False,
+                    rtscts=False,
+                    dsrdtr=False,
+                )
+                port.dtr = True
+                port.rts = True
 
-            time.sleep(1.0)
-            return True
-        except OSError:
-            return False
-        except PermissionError:
-            return False
-        except Exception:
-            return False
+                startup_messages = self._probe_serial_port(port)
+                if startup_messages:
+                    self.serialPort = port
+                    self.active_baudrate = baudrate
+                    self._startup_messages = startup_messages
+                    self.message_handler(f"Connected to {self.comModel.selectedPort} at {baudrate} baud")
+                    return True
+
+                port.close()
+            except OSError as ex:
+                self.last_connect_error = str(ex)
+                return False
+            except PermissionError as ex:
+                self.last_connect_error = str(ex)
+                return False
+            except Exception as ex:
+                self.last_connect_error = str(ex)
+                continue
+
+        self.active_baudrate = None
+        self.last_connect_error = self.last_connect_error or "No readable response received on common baud rates"
+        return False
 
     def ComClose(self) -> bool:
         self.OpDisrupt()
@@ -214,26 +236,34 @@ class ComViewModel:
         self._start_background(self.SerialSender, "SerialSender")
         self._start_background(self.UICommandSentUpdateTask, "UICommandSentUpdateTask")
 
+        for line in self._startup_messages:
+            self._queue_received_line(line)
+        self._startup_messages = []
+
     def SerialReceiver(self) -> None:
         buffer: list[str] = []
-        readBuffer = [""] * 1024
-        _ = readBuffer
+        last_data_time = 0.0
 
         while self.cancellationTokenSource is not None and not self.cancellationTokenSource.is_set():
             try:
                 if self.serialPort is not None and self.serialPort.in_waiting > 0:
                     data = self.serialPort.read(self.serialPort.in_waiting).decode(errors="ignore")
+                    last_data_time = time.monotonic()
                     for ch in data:
-                        if ch == "\n":
+                        if ch in ("\r", "\n"):
                             line = "".join(buffer).strip()
                             buffer.clear()
 
-                            if "ok" in line:
-                                self.comModel.Ack -= 1
                             if len(line) > 1:
-                                self.uiReceivedQueue.put(line)
+                                self._queue_received_line(line)
                         else:
                             buffer.append(ch)
+                elif buffer and last_data_time and (time.monotonic() - last_data_time) > 0.2:
+                    line = "".join(buffer).strip()
+                    buffer.clear()
+                    last_data_time = 0.0
+                    if len(line) > 1:
+                        self._queue_received_line(line)
                 else:
                     time.sleep(0.005)
             except Exception:
@@ -624,6 +654,84 @@ class ComViewModel:
         thread = threading.Thread(target=target, name=name, daemon=True)
         thread.start()
         self._threads.append(thread)
+
+    def _queue_received_line(self, line: str) -> None:
+        if "ok" in line.lower() and self.comModel.Ack > 0:
+            self.comModel.Ack -= 1
+        self.uiReceivedQueue.put(line)
+
+    @staticmethod
+    def _candidate_baudrates() -> tuple[int, ...]:
+        return (250000, 115200, 230400, 57600, 9600)
+
+    def _probe_serial_port(self, port: Any) -> list[str]:
+        messages: list[str] = []
+        commands = ("", "M115", "M105", "M155 S1")
+
+        time.sleep(2.5)
+        port.reset_input_buffer()
+        port.reset_output_buffer()
+
+        for command in commands:
+            if command:
+                port.write((command + "\n").encode("utf-8"))
+                port.flush()
+            else:
+                port.write(b"\n")
+                port.flush()
+
+            messages.extend(self._read_probe_lines(port, duration=1.2))
+            if messages:
+                break
+
+        return messages
+
+    def _read_probe_lines(self, port: Any, duration: float) -> list[str]:
+        end_time = time.monotonic() + duration
+        buffer = ""
+        lines: list[str] = []
+
+        while time.monotonic() < end_time:
+            chunk = port.read(port.in_waiting or 1)
+            if not chunk:
+                time.sleep(0.05)
+                continue
+
+            buffer += chunk.decode("utf-8", errors="ignore")
+            normalized = buffer.replace("\r", "\n")
+            parts = normalized.split("\n")
+            buffer = parts.pop() if parts else ""
+
+            for part in parts:
+                line = part.strip()
+                if line:
+                    lines.append(line)
+
+        trailing = buffer.strip()
+        if trailing:
+            lines.append(trailing)
+
+        return [line for line in lines if self._looks_like_device_output(line)]
+
+    @staticmethod
+    def _looks_like_device_output(line: str) -> bool:
+        lowered = line.lower()
+        indicators = ("ok", "error", "echo", "t:", "t0:", "t1:", "b:", "firmware", "marlin", "filament dia")
+        return any(indicator in lowered for indicator in indicators)
+
+    @staticmethod
+    def _choose_port(ports: list[Any], current_port: str | None = None) -> str | None:
+        if current_port and any(getattr(port, "device", None) == current_port for port in ports):
+            return current_port
+        if not ports:
+            return None
+
+        def port_score(port: Any) -> int:
+            text = f"{getattr(port, 'device', '')} {getattr(port, 'description', '')} {getattr(port, 'hwid', '')}".lower()
+            keywords = ("usb", "serial", "uart", "ch340", "cp210", "ftdi", "arduino", "esp")
+            return sum(1 for keyword in keywords if keyword in text)
+
+        return max(ports, key=port_score).device
 
     @staticmethod
     def _default_message_handler(message: str) -> None:
