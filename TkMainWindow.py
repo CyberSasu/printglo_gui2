@@ -88,17 +88,20 @@ class TkMainWindow:
 
         self.notebook = ttk.Notebook(self.root)
         self.controls_tab = ttk.Frame(self.notebook, padding=12)
+        self.pid_tab = ttk.Frame(self.notebook, padding=12)
         self.settings_tab = ttk.Frame(self.notebook, padding=12)
         self.commands_tab = ttk.Frame(self.notebook, padding=12)
         self.logs_tab = ttk.Frame(self.notebook, padding=12)
 
         self.notebook.add(self.controls_tab, text="Controls")
+        self.notebook.add(self.pid_tab, text="PID Tuning")
         self.notebook.add(self.settings_tab, text="Settings")
         self.notebook.add(self.commands_tab, text="Commands")
         self.notebook.add(self.logs_tab, text="Logs")
         self.notebook.pack(fill="both", expand=True)
 
         self._build_controls_tab()
+        self._build_pid_tab()
         self._build_settings_tab()
         self._build_commands_tab()
         self._build_logs_tab()
@@ -179,38 +182,8 @@ class TkMainWindow:
             ttk.Label(temperature, textvariable=self.temp_current_vars[tag], style="Status.TLabel").grid(row=row, column=2, sticky="w", padx=(8, 8), pady=4)
             ttk.Button(temperature, textvariable=self.temp_button_text[tag], command=lambda current_tag=tag: self._toggle_temp(current_tag)).grid(row=row, column=3, sticky="w", padx=(8, 8), pady=4)
 
-        tuning = ttk.LabelFrame(self.controls_tab, text="PID Tuning", padding=12)
-        tuning.grid(row=1, column=1, sticky="nsew", pady=(12, 8))
-        tuning.columnconfigure(4, weight=1)
-
-        ttk.Label(tuning, text="Target").grid(row=0, column=0, sticky="w")
-        for column, tag in enumerate(("1", "2", "3", "4"), start=1):
-            ttk.Radiobutton(tuning, text=f"T{tag}", value=tag, variable=self.curr_t_var).grid(row=0, column=column, sticky="w")
-
-        ttk.Label(tuning, text="Tuning Temp").grid(row=1, column=0, sticky="w", pady=(10, 0))
-        self.tuning_temp_entry = ttk.Entry(tuning, textvariable=self.tuning_temp_var, width=10)
-        self.tuning_temp_entry.grid(row=1, column=1, sticky="w", pady=(10, 0))
-        ttk.Label(tuning, text="Cycles").grid(row=1, column=2, sticky="w", pady=(10, 0))
-        self.tuning_cycles_entry = ttk.Entry(tuning, textvariable=self.tuning_cycles_var, width=10)
-        self.tuning_cycles_entry.grid(row=1, column=3, sticky="w", pady=(10, 0))
-
-        ttk.Label(tuning, text="P").grid(row=2, column=0, sticky="w", pady=(10, 0))
-        self.tuning_p_entry = ttk.Entry(tuning, textvariable=self.tuning_p_var, width=12)
-        self.tuning_p_entry.grid(row=2, column=1, sticky="w", pady=(10, 0))
-        ttk.Label(tuning, text="I").grid(row=2, column=2, sticky="w", pady=(10, 0))
-        self.tuning_i_entry = ttk.Entry(tuning, textvariable=self.tuning_i_var, width=12)
-        self.tuning_i_entry.grid(row=2, column=3, sticky="w", pady=(10, 0))
-        ttk.Label(tuning, text="D").grid(row=2, column=4, sticky="w", pady=(10, 0))
-        self.tuning_d_entry = ttk.Entry(tuning, textvariable=self.tuning_d_var, width=12)
-        self.tuning_d_entry.grid(row=2, column=5, sticky="w", pady=(10, 0))
-
-        ttk.Button(tuning, text="Start Tuning", command=self._start_tuning).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-        ttk.Button(tuning, text="Set PID", command=self._set_pid).grid(row=3, column=2, columnspan=2, sticky="ew", pady=(12, 0))
-        ttk.Checkbutton(tuning, text="Enable Log File", variable=self.is_log_var, command=self._apply_logging_flag).grid(row=3, column=4, columnspan=2, sticky="w", pady=(12, 0))
-        ttk.Label(tuning, textvariable=self.tuning_status_var, style="Status.TLabel").grid(row=4, column=0, columnspan=6, sticky="w", pady=(10, 0))
-
         motors = ttk.LabelFrame(self.controls_tab, text="Motion", padding=12)
-        motors.grid(row=2, column=1, sticky="nsew", pady=8)
+        motors.grid(row=1, column=1, sticky="nsew", pady=(12, 8))
         motors.columnconfigure(1, weight=1)
 
         self.motor_entries: dict[str, list[ttk.Entry]] = {}
@@ -218,7 +191,6 @@ class TkMainWindow:
             ("Auger", "Auger", "Set auger speed"),
             ("Puller", "", "Set puller speed"),
             ("Spooler", "Spooler", "Auto spooler from puller"),
-            ("Manual Spool", "Spool", "Manual spool speed"),
             ("Winder", "Winder", "Set winder speed"),
         ]
 
@@ -231,7 +203,7 @@ class TkMainWindow:
 
         for row, (label_text, command, button_text) in enumerate(motor_rows):
             ttk.Label(motors, text=label_text).grid(row=row, column=0, sticky="w", pady=4)
-            key = "Spooler" if label_text == "Manual Spool" else label_text
+            key = label_text
             entry = ttk.Entry(motors, textvariable=self.motor_vars[key], width=14)
             entry.grid(row=row, column=1, sticky="ew", padx=(8, 8), pady=4)
             self.motor_entries.setdefault(key, []).append(entry)
@@ -277,6 +249,39 @@ class TkMainWindow:
         self.custom_entry.bind("<Up>", self._on_custom_up)
         self.custom_entry.bind("<Down>", self._on_custom_down)
         ttk.Button(custom, text="Send Command", command=self._custom_send).grid(row=0, column=1)
+
+    def _build_pid_tab(self) -> None:
+        self.pid_tab.columnconfigure(0, weight=1)
+
+        tuning = ttk.LabelFrame(self.pid_tab, text="PID Tuning", padding=12)
+        tuning.grid(row=0, column=0, sticky="nsew")
+        tuning.columnconfigure(4, weight=1)
+
+        ttk.Label(tuning, text="Target").grid(row=0, column=0, sticky="w")
+        for column, tag in enumerate(("1", "2", "3", "4"), start=1):
+            ttk.Radiobutton(tuning, text=f"T{tag}", value=tag, variable=self.curr_t_var).grid(row=0, column=column, sticky="w")
+
+        ttk.Label(tuning, text="Tuning Temp").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self.tuning_temp_entry = ttk.Entry(tuning, textvariable=self.tuning_temp_var, width=10)
+        self.tuning_temp_entry.grid(row=1, column=1, sticky="w", pady=(10, 0))
+        ttk.Label(tuning, text="Cycles").grid(row=1, column=2, sticky="w", pady=(10, 0))
+        self.tuning_cycles_entry = ttk.Entry(tuning, textvariable=self.tuning_cycles_var, width=10)
+        self.tuning_cycles_entry.grid(row=1, column=3, sticky="w", pady=(10, 0))
+
+        ttk.Label(tuning, text="P").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        self.tuning_p_entry = ttk.Entry(tuning, textvariable=self.tuning_p_var, width=12)
+        self.tuning_p_entry.grid(row=2, column=1, sticky="w", pady=(10, 0))
+        ttk.Label(tuning, text="I").grid(row=2, column=2, sticky="w", pady=(10, 0))
+        self.tuning_i_entry = ttk.Entry(tuning, textvariable=self.tuning_i_var, width=12)
+        self.tuning_i_entry.grid(row=2, column=3, sticky="w", pady=(10, 0))
+        ttk.Label(tuning, text="D").grid(row=2, column=4, sticky="w", pady=(10, 0))
+        self.tuning_d_entry = ttk.Entry(tuning, textvariable=self.tuning_d_var, width=12)
+        self.tuning_d_entry.grid(row=2, column=5, sticky="w", pady=(10, 0))
+
+        ttk.Button(tuning, text="Start Tuning", command=self._start_tuning).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        ttk.Button(tuning, text="Set PID", command=self._set_pid).grid(row=3, column=2, columnspan=2, sticky="ew", pady=(12, 0))
+        ttk.Checkbutton(tuning, text="Enable Log File", variable=self.is_log_var, command=self._apply_logging_flag).grid(row=3, column=4, columnspan=2, sticky="w", pady=(12, 0))
+        ttk.Label(tuning, textvariable=self.tuning_status_var, style="Status.TLabel").grid(row=4, column=0, columnspan=6, sticky="w", pady=(10, 0))
 
     def _build_settings_tab(self) -> None:
         self.settings_tab.columnconfigure(0, weight=1)
