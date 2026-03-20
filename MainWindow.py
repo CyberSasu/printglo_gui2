@@ -137,6 +137,9 @@ class MainWindow:
         self.comViewModel.isPullerAuto = self.PullerToggle is True
         self.comViewModel.StartOp()
 
+    def StartSpoolingClick(self, sender: object | None = None, e: object | None = None) -> None:
+        self.comViewModel.StartSpooling()
+
     def StopOpClick(self, sender: object | None = None, e: object | None = None) -> None:
         self.comViewModel.StopOp()
 
