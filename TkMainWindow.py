@@ -226,16 +226,14 @@ class TkMainWindow:
         operation.columnconfigure(0, weight=1)
         operation.columnconfigure(1, weight=1)
         operation.columnconfigure(2, weight=1)
-        operation.columnconfigure(3, weight=1)
 
         ttk.Checkbutton(operation, text="Puller Auto", variable=self.puller_auto_var).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(operation, text="Winder Auto", variable=self.winder_auto_var).grid(row=0, column=1, sticky="w")
         ttk.Checkbutton(operation, text="Spooler Auto", variable=self.spooler_auto_var).grid(row=0, column=2, sticky="w")
 
         ttk.Button(operation, text="Start Operation", style="Accent.TButton", command=self._start_operation).grid(row=1, column=0, sticky="ew", pady=(12, 0), padx=(0, 8))
-        ttk.Button(operation, text="Start Spooling", command=self._start_spooling).grid(row=1, column=1, sticky="ew", pady=(12, 0), padx=8)
-        ttk.Button(operation, text="Stop Operation", command=self._stop_operation).grid(row=1, column=2, sticky="ew", pady=(12, 0), padx=8)
-        ttk.Button(operation, text="Emergency Stop", command=self._emergency_stop).grid(row=1, column=3, sticky="ew", pady=(12, 0), padx=(8, 0))
+        ttk.Button(operation, text="Stop Operation", command=self._stop_operation).grid(row=1, column=1, sticky="ew", pady=(12, 0), padx=8)
+        ttk.Button(operation, text="Emergency Stop", command=self._emergency_stop).grid(row=1, column=2, sticky="ew", pady=(12, 0), padx=(8, 0))
 
         ttk.Label(operation, text="Read Dia").grid(row=2, column=0, sticky="w", pady=(12, 0))
         ttk.Label(operation, textvariable=self.read_fdia_var, style="Status.TLabel").grid(row=2, column=1, sticky="w", pady=(12, 0))
@@ -682,9 +680,6 @@ class TkMainWindow:
                 SpoolerToggle=self.spooler_auto_var.get(),
             )
         )
-
-    def _start_spooling(self) -> None:
-        self._run_background(self.controller.StartSpoolingClick)
 
     def _stop_operation(self) -> None:
         self._run_background(self.controller.StopOpClick)
