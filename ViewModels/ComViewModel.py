@@ -88,6 +88,7 @@ class ComViewModel:
         self.isWinderAuto = False
         self.isSpoolerAuto = False
         self.isPullerAuto = False
+        self.isSpoolingActive = False
 
         self.AugerRPM = 0.0
         self.SpoolerRPM = 0.0
@@ -336,6 +337,7 @@ class ComViewModel:
         if self.serialPort is None or not self.serialPort.is_open:
             return
 
+        self.isSpoolingActive = False
         self.comModel.OpRun = True
         self._start_background(self.SerialOpThread, "SerialOpThread")
 
@@ -352,6 +354,26 @@ class ComViewModel:
             time.sleep(1.0)
 
         self.SendCommand(self.Setting.commands.WinderMove, _format_command_value(self.Setting.values.WinderStart))
+        self.SendCommand(self.Setting.commands.WinderSetPos, "0")
+        self.SendCommand(self.Setting.commands.Winder, _format_command_value(self.WinderRPM))
+
+        while (
+            self.comModel.OpRun
+            and self.cancellationTokenSource is not None
+            and not self.cancellationTokenSource.is_set()
+            and not self.isSpoolingActive
+        ):
+            try:
+                self.Send(self._build_pre_spool_command())
+                self.Send(self.Setting.commands.FRead)
+                time.sleep(self.Setting.values.OpDelay / 1000.0)
+            except Exception:
+                self.OpDisrupt()
+                return
+
+        if not self.comModel.OpRun or self.cancellationTokenSource is None or self.cancellationTokenSource.is_set():
+            return
+
         self.SendCommand(self.Setting.commands.WinderSetPos, "0")
         self.SendCommand(self.Setting.commands.Winder, _format_command_value(self.WinderRPM))
 
@@ -388,10 +410,14 @@ class ComViewModel:
 
     def OpDisrupt(self) -> None:
         self.comModel.OpRun = False
+        self.isSpoolingActive = False
         self.comModel.Ack = 0
         self.linesToSend = queue.Queue()
 
         self.SendCommand(self.Setting.commands.StopMotion)
+
+    def StartSpooling(self) -> None:
+        self.isSpoolingActive = True
 
     def Printgaps(self, input_value: str) -> str:
         if ";" in input_value:
@@ -654,6 +680,14 @@ class ComViewModel:
         thread = threading.Thread(target=target, name=name, daemon=True)
         thread.start()
         self._threads.append(thread)
+
+    def _build_pre_spool_command(self) -> str:
+        command = self.Setting.commands.OpMotion or "G1 X1 Y1 A1 B{} E1 F60"
+        command = re.sub(r"A(?:\{\}|-?\d+(?:\.\d+)?)", "A0", command, count=1, flags=re.IGNORECASE)
+        command = re.sub(r"B(?:\{\}|-?\d+(?:\.\d+)?)", "B0", command, count=1, flags=re.IGNORECASE)
+        if "{}" in command:
+            command = command.replace("{}", "0")
+        return command
 
     def _queue_received_line(self, line: str) -> None:
         if "ok" in line.lower() and self.comModel.Ack > 0:
