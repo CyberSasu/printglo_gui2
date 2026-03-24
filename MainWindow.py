@@ -34,8 +34,7 @@ class MainWindow:
         self.Ext4TempSliderDataContext = None
 
         self.PullerToggle = False
-        self.WinderToggle = False
-        self.SpoolerToggle = False
+        self.AutoModeToggle = False
 
         self.InitializeModels()
         self.InitializeViewModels()
@@ -118,23 +117,22 @@ class MainWindow:
         sender: object | None = None,
         e: object | None = None,
         PullerToggle: bool | None = None,
-        WinderToggle: bool | None = None,
-        SpoolerToggle: bool | None = None,
+        AutoModeToggle: bool | None = None,
     ) -> None:
         if PullerToggle is not None:
             self.PullerToggle = PullerToggle
-        if WinderToggle is not None:
-            self.WinderToggle = WinderToggle
-        if SpoolerToggle is not None:
-            self.SpoolerToggle = SpoolerToggle
+        if AutoModeToggle is not None:
+            self.AutoModeToggle = AutoModeToggle
+
+        self.comViewModel.isAutoMode = self.AutoModeToggle is True
+        self.comViewModel.isPullerAuto = self.PullerToggle is True
 
         if self.PullerToggle is True:
             self.comViewModel.SetNewPuller()
             time.sleep(2.5)
+        elif self.AutoModeToggle is True:
+            self.comViewModel.AutoMode()
 
-        self.comViewModel.isWinderAuto = self.WinderToggle is True
-        self.comViewModel.isSpoolerAuto = self.SpoolerToggle is True
-        self.comViewModel.isPullerAuto = self.PullerToggle is True
         self.comViewModel.StartOp()
 
     def StartSpoolingClick(self, sender: object | None = None, e: object | None = None) -> None:

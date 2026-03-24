@@ -64,6 +64,16 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return value
 
 
+def _round_to_nearest_step(value: float, step: float) -> float:
+    if step == 0:
+        return float(value)
+
+    scaled = float(value) / float(step)
+    if scaled >= 0:
+        return math.floor(scaled + 0.5) * step
+    return math.ceil(scaled - 0.5) * step
+
+
 class ComViewModel:
     def __init__(self, sm: SettingModel, message_handler: Callable[[str], None] | None = None) -> None:
         self.PropertyChanged: list[Callable[[Any, str], None]] = []
@@ -85,8 +95,7 @@ class ComViewModel:
         self._Setting = sm
         self._comModel = ComModel()
 
-        self.isWinderAuto = False
-        self.isSpoolerAuto = False
+        self.isAutoMode = False
         self.isPullerAuto = False
         self.isSpoolingActive = False
 
@@ -94,6 +103,10 @@ class ComViewModel:
         self.SpoolerRPM = 0.0
         self.WinderRPM = 0.0
         self.PullerRPM = 0.0
+        self.CurrentLayerCount = 0
+        self.TotalLayerCount = 0
+
+        self._spooler_core_dia = 0.0
 
         self._threads: list[threading.Thread] = []
 
@@ -338,6 +351,8 @@ class ComViewModel:
             return
 
         self.isSpoolingActive = False
+        self._spooler_core_dia = self.Setting.values.SpoolerID
+        self._update_layer_counts(self.Setting.values.SpoolerID, self.Setting.values.FDia)
         self.comModel.OpRun = True
         self._start_background(self.SerialOpThread, "SerialOpThread")
 
@@ -345,7 +360,7 @@ class ComViewModel:
         j = 0
         i = 0
         wc = 1
-        self.SendCommand(self.Setting.commands.Winder, "600")
+        self.SendCommand(self.Setting.commands.Winder, _format_command_value(self.Setting.values.WinderSpmm))
         time.sleep(1.0)
         self.Send(self.Setting.commands.OpPreset)
         time.sleep(1.0)
@@ -353,7 +368,8 @@ class ComViewModel:
         while self.comModel.Ack > 0:
             time.sleep(1.0)
 
-        self.SendCommand(self.Setting.commands.WinderMove, _format_command_value(self.Setting.values.WinderStart))
+        winder_start=round(self.Setting.values.WinderStart,2)
+        self.SendCommand(self.Setting.commands.WinderMove, _format_command_value(winder_start))
         self.SendCommand(self.Setting.commands.WinderSetPos, "0")
         self.SendCommand(self.Setting.commands.Winder, _format_command_value(self.WinderRPM))
 
@@ -386,8 +402,8 @@ class ComViewModel:
                     if j >= 2:
                         self.Setting.values.SpoolerID = self.Setting.values.SpoolerID + (2 * self.Setting.values.FDia)
                         j = 0
-                        if self.isSpoolerAuto:
-                            self.MotorControl("Spooler")
+                        if self.isAutoMode:
+                            self.AutoMode()
                 i += 1
 
                 self.ParseSend(self.Setting.commands.OpMotion, f"{wc}")
@@ -418,6 +434,54 @@ class ComViewModel:
 
     def StartSpooling(self) -> None:
         self.isSpoolingActive = True
+    def _update_layer_counts(self, current_dia: float, filament_dia: float) -> None:
+            current_dia = float(current_dia)
+            filament_dia = float(filament_dia)
+
+            if current_dia > 0 and self._spooler_core_dia <= 0:
+                self._spooler_core_dia = current_dia
+
+            layer_step = 2 * filament_dia
+            if layer_step <= 0 or self._spooler_core_dia <= 0:
+                self.CurrentLayerCount = 0
+                self.TotalLayerCount = 0
+                return
+
+            current_layers = _csharp_divide(current_dia - self._spooler_core_dia, layer_step)
+            total_layers = _csharp_divide(self.Setting.values.SpoolerOD - self._spooler_core_dia, layer_step)
+
+            self.CurrentLayerCount = max(0, int(round(current_layers)))
+            self.TotalLayerCount = max(0, int(math.floor(total_layers + 1e-9)))
+
+    def AutoMode(self) -> None:
+        current_dia = self.Setting.values.SpoolerID
+        puller_dia = self.Setting.values.PullerDia
+        target_dia = self.Setting.values.FDia
+        winder_pitch = self.Setting.values.WinderPitch
+
+        if current_dia <= 0 or puller_dia <= 0 or target_dia <= 0 or winder_pitch <= 0:
+            return
+
+        self._update_layer_counts(current_dia, target_dia)
+
+        line_speed = puller_dia * self.Setting.values.Puller
+        spool_current_dia = (current_dia)
+
+        spool_rpm = _csharp_divide(line_speed, current_dia)
+        winder_ratio = _csharp_divide(target_dia, winder_pitch)
+        self.SpoolerRPM = round(_csharp_divide(line_speed, spool_current_dia) * self.Setting.values.SpoolerSpmm / 60, 2)
+
+        spooler_command_value = _csharp_divide(line_speed, spool_current_dia)
+        self.WinderRPM = round(spooler_command_value * winder_ratio * 37.5, 3)
+        calc_value = _csharp_divide(self.Setting.values.WinderSpmm * self.Setting.values.WinderMax, self.WinderRPM)
+
+        if math.isfinite(calc_value):
+            self.Setting.values.CalcWinder = _csharp_floor_round(calc_value)
+        else:
+            self.Setting.values.CalcWinder = 1.0
+
+        self.ParseSend(self.Setting.commands.Spooler, _format_command_value(self.SpoolerRPM))
+        self.ParseSend(self.Setting.commands.Winder, _format_command_value(self.WinderRPM))
 
     def Printgaps(self, input_value: str) -> str:
         if ";" in input_value:
@@ -547,34 +611,23 @@ class ComViewModel:
     def MotorControl(self, motor: str = "") -> None:
         if motor == "Auger":
             self.AugerRPM = round(self.Setting.values.Auger * self.Setting.values.Spmm / 60, 2)
-            self.SendCommand(self.Setting.commands.Auger, _format_command_value(self.AugerRPM))
+            # self.SendCommand("M410")
+            self._send_auger_rpm_command()
         elif motor == "Winder":
             self.WinderRPM = round(self.Setting.values.Winder, 2)
             calc_value = _csharp_divide(self.Setting.values.WinderSpmm * self.Setting.values.WinderMax, self.WinderRPM)
             self.Setting.values.CalcWinder = _csharp_floor_round(calc_value)
             self.SendCommand(self.Setting.commands.Winder, _format_command_value(self.WinderRPM))
         elif motor == "Spooler":
-            s = _csharp_divide(self.Setting.values.Puller * self.Setting.values.PullerDia, self.Setting.values.SpoolerID)
-            self.SpoolerRPM = round(s * self.Setting.values.SpoolerSpmm / 60, 2)
-            self.SendCommand(self.Setting.commands.Spooler, _format_command_value(self.SpoolerRPM))
-            if self.isWinderAuto:
-                self.WinderRPM = round(self.SpoolerRPM * self.Setting.values.WinderPitch, 2)
-                calc_value = _csharp_divide(self.Setting.values.WinderSpmm * self.Setting.values.WinderMax, self.WinderRPM)
-                self.Setting.values.CalcWinder = _csharp_floor_round(calc_value)
-                self.SendCommand(self.Setting.commands.Winder, _format_command_value(self.WinderRPM))
+            self.AutoMode()
         elif motor == "Spool":
             self.SpoolerRPM = round(self.Setting.values.Spooler * self.Setting.values.SpoolerSpmm / 60, 2)
             self.SendCommand(self.Setting.commands.Spooler, _format_command_value(self.SpoolerRPM))
-            if self.isWinderAuto:
-                self.WinderRPM = round(self.SpoolerRPM * self.Setting.values.WinderPitch, 2)
-                calc_value = _csharp_divide(self.Setting.values.WinderSpmm * self.Setting.values.WinderMax, self.WinderRPM)
-                self.Setting.values.CalcWinder = _csharp_floor_round(calc_value)
-                self.SendCommand(self.Setting.commands.Winder, _format_command_value(self.WinderRPM))
         else:
             self.PullerRPM = round(self.Setting.values.Puller * self.Setting.values.Spmm / 60, 2)
             self.SendCommand(self.Setting.commands.Puller, _format_command_value(self.PullerRPM))
-            if self.isSpoolerAuto:
-                self.MotorControl("Spooler")
+            if self.isAutoMode:
+                self.AutoMode()
 
     def FanControl(self, isOn: bool, fan: int = 0) -> None:
         intensity = 0.0
@@ -689,6 +742,11 @@ class ComViewModel:
             command = command.replace("{}", "0")
         return command
 
+    def _send_auger_rpm_command(self) -> None:
+        # self.SendCommand("M410")
+        self.SendCommand(self.Setting.commands.Auger, _format_command_value(self.AugerRPM))
+
+    
     def _queue_received_line(self, line: str) -> None:
         if "ok" in line.lower() and self.comModel.Ack > 0:
             self.comModel.Ack -= 1

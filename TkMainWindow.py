@@ -58,6 +58,7 @@ class TkMainWindow:
         self.ack_var = tk.StringVar()
         self.op_run_var = tk.StringVar()
         self.read_fdia_var = tk.StringVar()
+        self.layer_var = tk.StringVar()
         self.rpm_var = tk.StringVar()
         self.tuning_status_var = tk.StringVar()
 
@@ -82,8 +83,7 @@ class TkMainWindow:
         self.tuning_d_var = tk.StringVar()
 
         self.puller_auto_var = tk.BooleanVar()
-        self.winder_auto_var = tk.BooleanVar()
-        self.spooler_auto_var = tk.BooleanVar()
+        self.auto_mode_var = tk.BooleanVar()
         self._syncing_ui = False
 
         self.notebook = ttk.Notebook(self.root)
@@ -190,7 +190,6 @@ class TkMainWindow:
         motor_rows = [
             ("Auger", "Auger", "Set auger speed"),
             ("Puller", "", "Set puller speed"),
-            ("Spooler", "Spooler", "Auto spooler from puller"),
             ("Manual Spool", "Spool", "Manual spool speed"),
             ("Winder", "Winder", "Set winder speed"),
         ]
@@ -229,8 +228,7 @@ class TkMainWindow:
         operation.columnconfigure(3, weight=1)
 
         ttk.Checkbutton(operation, text="Puller Auto", variable=self.puller_auto_var).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(operation, text="Winder Auto", variable=self.winder_auto_var).grid(row=0, column=1, sticky="w")
-        ttk.Checkbutton(operation, text="Spooler Auto", variable=self.spooler_auto_var).grid(row=0, column=2, sticky="w")
+        ttk.Checkbutton(operation, text="Auto mode", variable=self.auto_mode_var).grid(row=0, column=1, sticky="w")
 
         ttk.Button(operation, text="Start Operation", style="Accent.TButton", command=self._start_operation).grid(row=1, column=0, sticky="ew", pady=(12, 0), padx=(0, 8))
         ttk.Button(operation, text="Start Spooling", command=self._start_spooling).grid(row=1, column=1, sticky="ew", pady=(12, 0), padx=8)
@@ -239,8 +237,10 @@ class TkMainWindow:
 
         ttk.Label(operation, text="Read Dia").grid(row=2, column=0, sticky="w", pady=(12, 0))
         ttk.Label(operation, textvariable=self.read_fdia_var, style="Status.TLabel").grid(row=2, column=1, sticky="w", pady=(12, 0))
-        ttk.Label(operation, text="RPM").grid(row=2, column=2, sticky="w", pady=(12, 0))
-        ttk.Label(operation, textvariable=self.rpm_var, style="Status.TLabel").grid(row=3, column=0, columnspan=4, sticky="w")
+        ttk.Label(operation, text="Layers").grid(row=2, column=2, sticky="w", pady=(12, 0))
+        ttk.Label(operation, textvariable=self.layer_var, style="Status.TLabel").grid(row=2, column=3, sticky="w", pady=(12, 0))
+        ttk.Label(operation, text="RPM").grid(row=3, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(operation, textvariable=self.rpm_var, style="Status.TLabel").grid(row=3, column=1, columnspan=3, sticky="w")
 
         custom = ttk.LabelFrame(self.controls_tab, text="Custom Command", padding=12)
         custom.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=8)
@@ -370,8 +370,7 @@ class TkMainWindow:
         self.is_log_var.trace_add("write", lambda *_: self._sync_is_log_var())
         self.firmware_var.trace_add("write", lambda *_: self._sync_firmware_var())
         self.puller_auto_var.trace_add("write", lambda *_: self._sync_operation_toggle("PullerToggle", self.puller_auto_var))
-        self.winder_auto_var.trace_add("write", lambda *_: self._sync_operation_toggle("WinderToggle", self.winder_auto_var))
-        self.spooler_auto_var.trace_add("write", lambda *_: self._sync_operation_toggle("SpoolerToggle", self.spooler_auto_var))
+        self.auto_mode_var.trace_add("write", lambda *_: self._sync_operation_toggle("AutoModeToggle", self.auto_mode_var))
 
         for tag, variable in self.temp_set_vars.items():
             variable.trace_add("write", lambda *_args, current_tag=tag: self._sync_float_attr(self.controller.comViewModel.comModel, f"SetTemp{current_tag}", self.temp_set_vars[current_tag]))
@@ -504,8 +503,7 @@ class TkMainWindow:
                     self.fan_vars[fan].set(self._format_value(getattr(setting.values, f"Fan{fan}")))
 
             self.puller_auto_var.set(self.controller.PullerToggle)
-            self.winder_auto_var.set(self.controller.WinderToggle)
-            self.spooler_auto_var.set(self.controller.SpoolerToggle)
+            self.auto_mode_var.set(self.controller.AutoModeToggle)
 
             if force or focus_widget is not self.tuning_temp_entry:
                 self.tuning_temp_var.set(self._format_value(setting.values.TuningTemp))
@@ -537,15 +535,27 @@ class TkMainWindow:
         setting = self.controller.sett
         view_model = self.controller.comViewModel
 
+        spooler_display_rpm = 0.0
+        spooler_display_rpm = round(view_model.SpoolerRPM, 2)
+
+        winder_ratio = 0.0
+        if setting.values.WinderPitch:
+            winder_ratio = setting.values.FDia / setting.values.WinderPitch
+
+        winder_display_rpm = 0.0
+        if winder_ratio:
+            winder_display_rpm = round(view_model.WinderRPM, 2)
+
         self.connection_var.set("Connected" if com_model.printerConnected else "Disconnected")
         self.ack_var.set(str(com_model.Ack))
         self.op_run_var.set("Running" if com_model.OpRun else "Idle")
         self.read_fdia_var.set(self._format_value(setting.values.ReadFDia))
+        self.layer_var.set(f"{view_model.CurrentLayerCount}")
         self.rpm_var.set(
             f"Auger {self._format_value(view_model.AugerRPM)} | "
             f"Puller {self._format_value(view_model.PullerRPM)} | "
-            f"Spooler {self._format_value(view_model.SpoolerRPM)} | "
-            f"Winder {self._format_value(view_model.WinderRPM)}"
+            f"Spooler {self._format_value(spooler_display_rpm)} | "
+            f"Winder {self._format_value(winder_display_rpm)}"
         )
         self.tuning_status_var.set("Tuning active" if com_model.isTuning else "Tuning idle")
 
@@ -615,8 +625,7 @@ class TkMainWindow:
             setting.values.Fan3 = int(float(self.fan_vars[3].get()))
 
             self.controller.PullerToggle = self.puller_auto_var.get()
-            self.controller.WinderToggle = self.winder_auto_var.get()
-            self.controller.SpoolerToggle = self.spooler_auto_var.get()
+            self.controller.AutoModeToggle = self.auto_mode_var.get()
             return True
         except ValueError as ex:
             messagebox.showerror("Invalid Value", f"Could not parse a numeric field.\n{ex}")
@@ -678,8 +687,7 @@ class TkMainWindow:
         self._run_background(
             lambda: self.controller.StartOpClick(
                 PullerToggle=self.puller_auto_var.get(),
-                WinderToggle=self.winder_auto_var.get(),
-                SpoolerToggle=self.spooler_auto_var.get(),
+                AutoModeToggle=self.auto_mode_var.get(),
             )
         )
 
