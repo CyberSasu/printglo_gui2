@@ -173,7 +173,7 @@ class TkMainWindow:
         ttk.Label(temperature, text="Zone").grid(row=0, column=0, sticky="w")
         ttk.Label(temperature, text="Set Temp").grid(row=0, column=1, sticky="w", padx=(8, 8))
         ttk.Label(temperature, text="Current").grid(row=0, column=2, sticky="w", padx=(8, 8))
-        ttk.Label(temperature, text="Set").grid(row=0, column=3, sticky="w", padx=(8, 8))
+        ttk.Label(temperature, text="State").grid(row=0, column=3, sticky="w", padx=(8, 8))
 
         for row, tag in enumerate(("1", "2", "3", "4"), start=1):
             ttk.Label(temperature, text=f"T{tag}").grid(row=row, column=0, sticky="w", pady=4)
@@ -204,7 +204,7 @@ class TkMainWindow:
 
         for row, (label_text, command, button_text) in enumerate(motor_rows):
             ttk.Label(motors, text=label_text).grid(row=row, column=0, sticky="w", pady=4)
-            key = "Spooler" if label_text == "Manual Spool" else label_text
+            key = "Spooler" if label_text == "Spool" else label_text
             entry = ttk.Entry(motors, textvariable=self.motor_vars[key], width=14)
             entry.grid(row=row, column=1, sticky="ew", padx=(8, 8), pady=4)
             self.motor_entries.setdefault(key, []).append(entry)
