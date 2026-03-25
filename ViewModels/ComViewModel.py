@@ -75,6 +75,9 @@ def _round_to_nearest_step(value: float, step: float) -> float:
     return math.ceil(scaled - 0.5) * step
 
 
+_ACK_LINE_PATTERN = re.compile(r"^ok(?:\s|:|$)", flags=re.IGNORECASE)
+
+
 class ComViewModel:
     def __init__(self, sm: SettingModel, message_handler: Callable[[str], None] | None = None) -> None:
         self.PropertyChanged: list[Callable[[Any, str], None]] = []
@@ -87,6 +90,7 @@ class ComViewModel:
         self.linesToSend: queue.Queue[str] = queue.Queue()
         self.uiReceivedQueue: queue.Queue[str] = queue.Queue()
         self.uiSentQueue: queue.Queue[str] = queue.Queue()
+        self._serial_write_lock = threading.Lock()
 
         self.message_handler = message_handler or self._default_message_handler
         self.last_connect_error: str | None = None
@@ -109,6 +113,7 @@ class ComViewModel:
 
         self._spooler_core_dia = 0.0
         self._filament_dia_window: deque[float] = deque(maxlen=10)
+        self._partial_line_timeout = 0.5
 
         self._threads: list[threading.Thread] = []
 
@@ -276,7 +281,7 @@ class ComViewModel:
                                 self._queue_received_line(line)
                         else:
                             buffer.append(ch)
-                elif buffer and last_data_time and (time.monotonic() - last_data_time) > 0.2:
+                elif buffer and last_data_time and (time.monotonic() - last_data_time) > self._partial_line_timeout:
                     line = "".join(buffer).strip()
                     buffer.clear()
                     last_data_time = 0.0
@@ -284,7 +289,8 @@ class ComViewModel:
                         self._queue_received_line(line)
                 else:
                     time.sleep(0.005)
-            except Exception:
+            except Exception as ex:
+                Logger.Log(f"SerialReceiver exception: {ex}")
                 self.ComClose()
                 break
 
@@ -332,18 +338,22 @@ class ComViewModel:
         _ = stringBuilder
 
         while self.cancellationTokenSource is not None and not self.cancellationTokenSource.is_set():
+            current_queue = self.linesToSend
             try:
-                command = self.linesToSend.get_nowait()
+                command = current_queue.get_nowait()
             except queue.Empty:
                 time.sleep(0.005)
                 continue
 
             try:
-                self.Send(command)
+                self._write_serial(command)
                 time.sleep(0.01)
-            except Exception:
+            except Exception as ex:
+                Logger.Log(f"SerialSender exception while sending {command!r}: {ex}")
                 self.ComClose()
                 break
+            finally:
+                current_queue.task_done()
 
     def UICommandSentUpdateTask(self) -> None:
         while self.cancellationTokenSource is not None and not self.cancellationTokenSource.is_set():
@@ -397,7 +407,6 @@ class ComViewModel:
             try:
                 self.Send(self._build_pre_spool_command())
                 self.Send(self.Setting.commands.FRead)
-                self.Send("M114")
                 time.sleep(self.Setting.values.OpDelay / 1000.0)
             except Exception:
                 self.OpDisrupt()
@@ -414,7 +423,6 @@ class ComViewModel:
             try:
                 self.ParseSend(self.Setting.commands.OpMotion, f"{wc}")
                 self.Send(self.Setting.commands.FRead)
-                self.Send("M114")
                 if self.comModel.isLog:
                     Logger.Log(
                         f"FilamentDia : {self.Setting.values.ReadFDia}, "
@@ -702,14 +710,8 @@ class ComViewModel:
                 self.ParseCommand(part, value)
 
     def SendImmediateCommand(self, command: str | None, value: str | float | int = "0") -> None:
-        if command is None:
-            return
-        parts = command.split(",")
-        if len(parts) == 1:
-            self.ParseSend(command, value)
-        else:
-            for part in parts:
-                self.ParseSend(part, value)
+        self.SendCommand(command, value)
+        self._wait_until_serial_idle()
 
     def ParseSend(self, command: str, value: str | float | int = "0") -> None:
         if "{}" in command:
@@ -719,9 +721,16 @@ class ComViewModel:
     def Send(self, command: str | None) -> None:
         if self.serialPort is None or command is None:
             return
-        self.serialPort.write((command + "\n").encode("utf-8"))
-        self.comModel.Ack += 1
-        self.uiSentQueue.put(command)
+        self.linesToSend.put(command)
+
+    def _write_serial(self, command: str | None) -> None:
+        if self.serialPort is None or not self.serialPort.is_open or command is None:
+            return
+        with self._serial_write_lock:
+            self.serialPort.write((command + "\n").encode("utf-8"))
+            self.serialPort.flush()
+            self.comModel.Ack += 1
+            self.uiSentQueue.put(command)
 
     def SetNewPuller(self) -> None:
         filament_control = self.Setting.values.Puller
@@ -817,6 +826,15 @@ class ComViewModel:
     def _wait_for_motion_complete(self) -> None:
         self.SendImmediateCommand("M400")
 
+    def _wait_until_serial_idle(self, timeout: float = 30.0) -> None:
+        end_time = time.monotonic() + timeout
+        while time.monotonic() < end_time:
+            if self.linesToSend.unfinished_tasks == 0 and self.comModel.Ack <= 0:
+                return
+            if self.cancellationTokenSource is not None and self.cancellationTokenSource.is_set():
+                return
+            time.sleep(0.01)
+
     def _is_spooling_from_left(self) -> bool:
         return str(self.Setting.values.SpoolingDirection).strip().lower() == "left"
 
@@ -832,7 +850,7 @@ class ComViewModel:
         line = line.replace("\x00", "").strip()
         if not line:
             return
-        if "ok" in line.lower() and self.comModel.Ack > 0:
+        if _ACK_LINE_PATTERN.match(line) and self.comModel.Ack > 0:
             self.comModel.Ack -= 1
         self.uiReceivedQueue.put(line)
 
