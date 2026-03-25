@@ -36,7 +36,7 @@ class ScrollableFrame(ttk.Frame):
 class TkMainWindow:
     def __init__(self, settings_path: str | Path | None = None) -> None:
         self.root = tk.Tk()
-        self.root.title("PrintGlow")
+        self.root.title("PrintGloo")
         self.root.geometry("1360x900")
         self.root.minsize(1100, 760)
 
@@ -84,6 +84,7 @@ class TkMainWindow:
 
         self.puller_auto_var = tk.BooleanVar()
         self.auto_mode_var = tk.BooleanVar()
+        self.spooling_direction_var = tk.StringVar()
         self._syncing_ui = False
 
         self.notebook = ttk.Notebook(self.root)
@@ -140,7 +141,7 @@ class TkMainWindow:
         self.controls_tab.columnconfigure(0, weight=1)
         self.controls_tab.columnconfigure(1, weight=1)
 
-        header = ttk.Label(self.controls_tab, text="PrintGlow Controller", style="Header.TLabel")
+        header = ttk.Label(self.controls_tab, text="PrintGloo Controller", style="Header.TLabel")
         header.grid(row=0, column=0, sticky="w")
 
         subheader = ttk.Label(self.controls_tab, textvariable=self.settings_path_var, style="Status.TLabel")
@@ -172,7 +173,7 @@ class TkMainWindow:
         ttk.Label(temperature, text="Zone").grid(row=0, column=0, sticky="w")
         ttk.Label(temperature, text="Set Temp").grid(row=0, column=1, sticky="w", padx=(8, 8))
         ttk.Label(temperature, text="Current").grid(row=0, column=2, sticky="w", padx=(8, 8))
-        ttk.Label(temperature, text="State").grid(row=0, column=3, sticky="w", padx=(8, 8))
+        ttk.Label(temperature, text="Set").grid(row=0, column=3, sticky="w", padx=(8, 8))
 
         for row, tag in enumerate(("1", "2", "3", "4"), start=1):
             ttk.Label(temperature, text=f"T{tag}").grid(row=row, column=0, sticky="w", pady=4)
@@ -188,10 +189,10 @@ class TkMainWindow:
 
         self.motor_entries: dict[str, list[ttk.Entry]] = {}
         motor_rows = [
-            ("Auger", "Auger", "Set auger speed"),
-            ("Puller", "", "Set puller speed"),
-            ("Manual Spool", "Spool", "Manual spool speed"),
-            ("Winder", "Winder", "Set winder speed"),
+            ("Auger", "Auger", "Set"),
+            ("Puller", "", "Set"),
+            ("Spool", "Spool", "Set"),
+            ("Winder", "Winder", "Set"),
         ]
 
         self.motor_vars = {
@@ -229,6 +230,8 @@ class TkMainWindow:
 
         ttk.Checkbutton(operation, text="Puller Auto", variable=self.puller_auto_var).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(operation, text="Auto mode", variable=self.auto_mode_var).grid(row=0, column=1, sticky="w")
+        ttk.Radiobutton(operation, text="Spooling From Right", value="Right", variable=self.spooling_direction_var).grid(row=0, column=2, sticky="w")
+        ttk.Radiobutton(operation, text="Spooling From Left", value="Left", variable=self.spooling_direction_var).grid(row=0, column=3, sticky="w")
 
         ttk.Button(operation, text="Start Operation", style="Accent.TButton", command=self._start_operation).grid(row=1, column=0, sticky="ew", pady=(12, 0), padx=(0, 8))
         ttk.Button(operation, text="Start Spooling", command=self._start_spooling).grid(row=1, column=1, sticky="ew", pady=(12, 0), padx=8)
@@ -371,6 +374,7 @@ class TkMainWindow:
         self.firmware_var.trace_add("write", lambda *_: self._sync_firmware_var())
         self.puller_auto_var.trace_add("write", lambda *_: self._sync_operation_toggle("PullerToggle", self.puller_auto_var))
         self.auto_mode_var.trace_add("write", lambda *_: self._sync_operation_toggle("AutoModeToggle", self.auto_mode_var))
+        self.spooling_direction_var.trace_add("write", lambda *_: self._sync_spooling_direction())
 
         for tag, variable in self.temp_set_vars.items():
             variable.trace_add("write", lambda *_args, current_tag=tag: self._sync_float_attr(self.controller.comViewModel.comModel, f"SetTemp{current_tag}", self.temp_set_vars[current_tag]))
@@ -421,6 +425,11 @@ class TkMainWindow:
         if self._syncing_ui:
             return
         setattr(self.controller, attr_name, variable.get())
+
+    def _sync_spooling_direction(self) -> None:
+        if self._syncing_ui:
+            return
+        self.controller.sett.values.SpoolingDirection = self.spooling_direction_var.get()
 
     def _sync_float_attr(self, target: Any, attr_name: str, variable: tk.StringVar) -> None:
         self._sync_typed_attr(target, attr_name, variable, float)
@@ -504,6 +513,7 @@ class TkMainWindow:
 
             self.puller_auto_var.set(self.controller.PullerToggle)
             self.auto_mode_var.set(self.controller.AutoModeToggle)
+            self.spooling_direction_var.set(setting.values.SpoolingDirection)
 
             if force or focus_widget is not self.tuning_temp_entry:
                 self.tuning_temp_var.set(self._format_value(setting.values.TuningTemp))
@@ -626,6 +636,7 @@ class TkMainWindow:
 
             self.controller.PullerToggle = self.puller_auto_var.get()
             self.controller.AutoModeToggle = self.auto_mode_var.get()
+            setting.values.SpoolingDirection = self.spooling_direction_var.get()
             return True
         except ValueError as ex:
             messagebox.showerror("Invalid Value", f"Could not parse a numeric field.\n{ex}")

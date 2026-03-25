@@ -5,6 +5,7 @@ import queue
 import re
 import threading
 import time
+from collections import deque
 from typing import Any, Callable
 
 from Logger import Logger
@@ -107,6 +108,7 @@ class ComViewModel:
         self.TotalLayerCount = 0
 
         self._spooler_core_dia = 0.0
+        self._filament_dia_window: deque[float] = deque(maxlen=10)
 
         self._threads: list[threading.Thread] = []
 
@@ -146,6 +148,8 @@ class ComViewModel:
         self.comModel.OpRun = False
         self.comModel.Ack = 0
         self.linesToSend = queue.Queue()
+        self._filament_dia_window.clear()
+        self.Setting.values.ReadFDia = 0
         self.comModel.printerConnected = True
         self.comModel.Temp1On = False
         self.comModel.Temp2On = False
@@ -292,27 +296,33 @@ class ComViewModel:
                 time.sleep(0.005)
                 continue
 
-            if "AUGER ERROR" in response:
-                self.comModel.printerConnected = False
-            elif "PID Autotune finished!" in response:
-                self._start_background(self.SetPID, "SetPID")
-            elif "Printer halted" in response:
-                self.comModel.printerConnected = False
-                self.message_handler(
-                    "Connect to machine again.\n"
-                    "Plug out and Plug in the power of the machine and restart the software again if it happens again.\n"
-                    "If issue persists contact the team"
-                )
-            elif "Filament dia" in response:
-                self.Setting.values.ReadFDia = float(response.split(":")[-1].strip())
-                self.Setting.values.CurrFDia.append(self.Setting.values.ReadFDia)
-                if self.isPullerAuto and self.comModel.OpRun:
-                    if len(self.Setting.values.CurrFDia) > self.Setting.values.PIDInterval:
-                        self.SetNewPuller()
-            elif "Kp:" in response:
-                self._start_background(lambda st=response: self.GetPID(st), "GetPID")
-            elif "T:" in response or "T1:" in response:
-                self._start_background(lambda st=response: self.GetTemp(st), "GetTemp")
+            try:
+                if "AUGER ERROR" in response:
+                    self.comModel.printerConnected = False
+                elif "PID Autotune finished!" in response:
+                    self._start_background(self.SetPID, "SetPID")
+                elif "Printer halted" in response:
+                    self.comModel.printerConnected = False
+                    self.message_handler(
+                        "Connect to machine again.\n"
+                        "Plug out and Plug in the power of the machine and restart the software again if it happens again.\n"
+                        "If issue persists contact the team"
+                    )
+                elif "Filament dia" in response:
+                    read_f_dia = self._extract_first_float(response)
+                    if read_f_dia is not None:
+                        self._filament_dia_window.append(read_f_dia)
+                        self.Setting.values.ReadFDia = round(sum(self._filament_dia_window) / len(self._filament_dia_window), 2)
+                        self.Setting.values.CurrFDia.append(read_f_dia)
+                        if self.isPullerAuto and self.comModel.OpRun:
+                            if len(self.Setting.values.CurrFDia) > self.Setting.values.PIDInterval:
+                                self.SetNewPuller()
+                elif "Kp:" in response:
+                    self._start_background(lambda st=response: self.GetPID(st), "GetPID")
+                elif "T:" in response or "T1:" in response:
+                    self._start_background(lambda st=response: self.GetTemp(st), "GetTemp")
+            except Exception as ex:
+                Logger.Log(f"Ignored malformed device response: {response!r} ({ex})")
 
             self._fire_response_received(response)
             time.sleep(0.005)
@@ -351,6 +361,8 @@ class ComViewModel:
             return
 
         self.isSpoolingActive = False
+        self._filament_dia_window.clear()
+        self.Setting.values.ReadFDia = 0
         self._spooler_core_dia = self.Setting.values.SpoolerID
         self._update_layer_counts(self.Setting.values.SpoolerID, self.Setting.values.FDia)
         self.comModel.OpRun = True
@@ -359,19 +371,22 @@ class ComViewModel:
     def SerialOpThread(self) -> None:
         j = 0
         i = 0
-        wc = 1
-        self.SendCommand(self.Setting.commands.Winder, _format_command_value(self.Setting.values.WinderSpmm))
+        wc = self._initial_winder_direction()
+        self.SendImmediateCommand(self.Setting.commands.Winder, _format_command_value(self.Setting.values.WinderSpmm))
         time.sleep(1.0)
-        self.Send(self.Setting.commands.OpPreset)
+        self.SendImmediateCommand(self.Setting.commands.OpPreset)
         time.sleep(1.0)
+        
+
 
         while self.comModel.Ack > 0:
             time.sleep(1.0)
+        self._wait_for_motion_complete()
 
-        winder_start=round(self.Setting.values.WinderStart,2)
-        self.SendCommand(self.Setting.commands.WinderMove, _format_command_value(winder_start))
-        self.SendCommand(self.Setting.commands.WinderSetPos, "0")
-        self.SendCommand(self.Setting.commands.Winder, _format_command_value(self.WinderRPM))
+        self._move_winder_to_start_position()
+        self._wait_for_motion_complete()
+        self.SendImmediateCommand(self.Setting.commands.Winder, _format_command_value(self.WinderRPM))
+        self.SendImmediateCommand(self.Setting.commands.WinderSetPos, _format_command_value(self._starting_winder_zero_position()))
 
         while (
             self.comModel.OpRun
@@ -382,6 +397,7 @@ class ComViewModel:
             try:
                 self.Send(self._build_pre_spool_command())
                 self.Send(self.Setting.commands.FRead)
+                self.Send("M114")
                 time.sleep(self.Setting.values.OpDelay / 1000.0)
             except Exception:
                 self.OpDisrupt()
@@ -390,24 +406,15 @@ class ComViewModel:
         if not self.comModel.OpRun or self.cancellationTokenSource is None or self.cancellationTokenSource.is_set():
             return
 
-        self.SendCommand(self.Setting.commands.WinderSetPos, "0")
-        self.SendCommand(self.Setting.commands.Winder, _format_command_value(self.WinderRPM))
+        self._wait_for_motion_complete()
+        self.SendImmediateCommand(self.Setting.commands.Winder, _format_command_value(self.WinderRPM))
+        self.SendImmediateCommand(self.Setting.commands.WinderSetPos, _format_command_value(self._starting_winder_zero_position()))
 
         while self.comModel.OpRun and self.cancellationTokenSource is not None and not self.cancellationTokenSource.is_set():
             try:
-                if i >= self.Setting.values.CalcWinder:
-                    wc = -wc
-                    i = 0
-                    j += 1
-                    if j >= 2:
-                        self.Setting.values.SpoolerID = self.Setting.values.SpoolerID + (2 * self.Setting.values.FDia)
-                        j = 0
-                        if self.isAutoMode:
-                            self.AutoMode()
-                i += 1
-
                 self.ParseSend(self.Setting.commands.OpMotion, f"{wc}")
                 self.Send(self.Setting.commands.FRead)
+                self.Send("M114")
                 if self.comModel.isLog:
                     Logger.Log(
                         f"FilamentDia : {self.Setting.values.ReadFDia}, "
@@ -416,6 +423,16 @@ class ComViewModel:
                         f"T1 : {self.comModel.Temp1}, T2 : {self.comModel.Temp2}, "
                         f"T3 : {self.comModel.Temp3}, T4 : {self.comModel.Temp4}"
                     )
+
+                i += 1
+                if i >= self._effective_calc_winder():
+                    wc = -wc
+                    i = 0
+                    j += 1
+                    self.Setting.values.SpoolerID = self.Setting.values.SpoolerID + (2 * self.Setting.values.FDia)
+                    if self.isAutoMode:
+                        self.AutoMode()
+
                 time.sleep(self.Setting.values.OpDelay / 1000.0)
             except Exception:
                 self.OpDisrupt()
@@ -518,6 +535,18 @@ class ComViewModel:
         if match:
             return round(float(match.group(1)), 2)
         return 0.0
+
+    @staticmethod
+    def _extract_first_float(input_value: str) -> float | None:
+        cleaned = input_value.replace("\x00", "").strip()
+        match = re.search(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", cleaned)
+        if not match:
+            return None
+
+        try:
+            return round(float(match.group(0)), 2)
+        except ValueError:
+            return None
 
     def GetPID(self, st: str) -> None:
         self.Setting.values.TuningP = self.ExtractPID(st, "Kp")
@@ -672,6 +701,16 @@ class ComViewModel:
             for part in parts:
                 self.ParseCommand(part, value)
 
+    def SendImmediateCommand(self, command: str | None, value: str | float | int = "0") -> None:
+        if command is None:
+            return
+        parts = command.split(",")
+        if len(parts) == 1:
+            self.ParseSend(command, value)
+        else:
+            for part in parts:
+                self.ParseSend(part, value)
+
     def ParseSend(self, command: str, value: str | float | int = "0") -> None:
         if "{}" in command:
             command = command.replace("{}", _format_command_value(value))
@@ -746,8 +785,53 @@ class ComViewModel:
         # self.SendCommand("M410")
         self.SendCommand(self.Setting.commands.Auger, _format_command_value(self.AugerRPM))
 
+    def _initial_winder_direction(self) -> int:
+        return -1 if self._is_spooling_from_left() else 1
+
+    def _move_winder_to_start_position(self) -> None:
+        if self._is_spooling_from_left():
+            left_edge = self._left_winder_edge()
+            self.SendImmediateCommand(self.Setting.commands.Winder, _format_command_value(self.Setting.values.Winder))
+            self.SendImmediateCommand(self.Setting.commands.WinderMove, _format_command_value(left_edge))
+            self.SendImmediateCommand(self.Setting.commands.Winder, _format_command_value(self.Setting.values.WinderSpmm))
+            self.SendImmediateCommand(self.Setting.commands.WinderMove, _format_command_value(-round(self.Setting.values.WinderStart, 2)))
+            return
+
+        self.SendImmediateCommand(self.Setting.commands.WinderMove, _format_command_value(round(self.Setting.values.WinderStart, 2)))
+
+    def _starting_winder_zero_position(self) -> float:
+        if not self._is_spooling_from_left():
+            return 0.0
+
+        left_edge = self._left_winder_edge()
+        left_edge1 = round(self.Setting.values.WinderLimit, 2)
+        start_offset = round(self.Setting.values.WinderStart, 2)
+        return max(0.0, left_edge1 - start_offset)
+
+    def _left_winder_edge(self) -> float:
+        left_edge = _csharp_divide(self.Setting.values.WinderLimit * self.Setting.values.WinderSpmm, self.Setting.values.Winder)
+        if not math.isfinite(left_edge):
+            return 0.0
+        return round(left_edge, 2)
+
+    def _wait_for_motion_complete(self) -> None:
+        self.SendImmediateCommand("M400")
+
+    def _is_spooling_from_left(self) -> bool:
+        return str(self.Setting.values.SpoolingDirection).strip().lower() == "left"
+
+    def _effective_calc_winder(self) -> int:
+        try:
+            calc_winder = int(float(self.Setting.values.CalcWinder))
+        except (TypeError, ValueError, OverflowError):
+            return 1
+        return max(1, calc_winder)
+
     
     def _queue_received_line(self, line: str) -> None:
+        line = line.replace("\x00", "").strip()
+        if not line:
+            return
         if "ok" in line.lower() and self.comModel.Ack > 0:
             self.comModel.Ack -= 1
         self.uiReceivedQueue.put(line)

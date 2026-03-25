@@ -37,10 +37,12 @@ class ValueModel:
         self._Spooler: float = 0
         self.CalcWinder: float = 0
         self._WinderMax: float = 0
+        self._WinderLimit: float = 0
         self._SpoolerID: float = 0
         self._SpoolerOD: float = 0
         self._Puller: float = 0
         self._WinderStart: float = 0
+        self._SpoolingDirection: str = "Right"
 
         self.PullerDia: float = 0
         self.Spmm: float = 0
@@ -195,6 +197,17 @@ class ValueModel:
             self.OnPropertyChanged("WinderMax")
 
     @property
+    def WinderLimit(self) -> float:
+        return self._WinderLimit
+
+    @WinderLimit.setter
+    def WinderLimit(self, value: float) -> None:
+        value = float(value)
+        if self._WinderLimit != value:
+            self._WinderLimit = _clamp(value, 0, float("inf"))
+            self.OnPropertyChanged("WinderLimit")
+
+    @property
     def SpoolerID(self) -> float:
         return self._SpoolerID
 
@@ -239,6 +252,18 @@ class ValueModel:
             self.OnPropertyChanged("WinderStart")
 
     @property
+    def SpoolingDirection(self) -> str:
+        return self._SpoolingDirection
+
+    @SpoolingDirection.setter
+    def SpoolingDirection(self, value: str) -> None:
+        direction = str(value).strip().lower()
+        normalized = "Left" if direction == "left" else "Right"
+        if self._SpoolingDirection != normalized:
+            self._SpoolingDirection = normalized
+            self.OnPropertyChanged("SpoolingDirection")
+
+    @property
     def FDia(self) -> float:
         return self._FDia
 
@@ -274,10 +299,12 @@ class ValueModel:
             "Winder": self.Winder,
             "Spooler": self.Spooler,
             "WinderMax": self.WinderMax,
+            "WinderLimit": self.WinderLimit,
             "SpoolerID": self.SpoolerID,
             "SpoolerOD": self.SpoolerOD,
             "Puller": self.Puller,
             "WinderStart": self.WinderStart,
+            "SpoolingDirection": self.SpoolingDirection,
             "PullerDia": self.PullerDia,
             "Spmm": self.Spmm,
             "SpoolerSpmm": self.SpoolerSpmm,
@@ -312,6 +339,8 @@ class ValueModel:
             "SpoolerSpmm",
             "WinderSpmm",
             "WinderPitch",
+            "WinderMax",
+            "WinderLimit",
             "PullerP",
             "PullerI",
             "PullerD",
@@ -341,12 +370,15 @@ class ValueModel:
             "Fan3",
             "Auger",
             "Winder",
+            "WinderMax",
             "Spooler",
             "WinderMax",
+            "WinderLimit",
             "SpoolerID",
             "SpoolerOD",
             "Puller",
             "WinderStart",
+            "SpoolingDirection",
             "FDia",
         ]
 
