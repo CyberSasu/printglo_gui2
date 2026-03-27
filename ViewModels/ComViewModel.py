@@ -6,6 +6,7 @@ import re
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from Logger import Logger
@@ -78,6 +79,12 @@ def _round_to_nearest_step(value: float, step: float) -> float:
 _ACK_LINE_PATTERN = re.compile(r"^ok(?:\s|:|$)", flags=re.IGNORECASE)
 
 
+@dataclass
+class _QueuedCommand:
+    text: str
+    ack_event: threading.Event | None = None
+
+
 class ComViewModel:
     def __init__(self, sm: SettingModel, message_handler: Callable[[str], None] | None = None) -> None:
         self.PropertyChanged: list[Callable[[Any, str], None]] = []
@@ -87,10 +94,13 @@ class ComViewModel:
         self.serialPort: serial.Serial | None = None if serial is not None else None
         self.cancellationTokenSource: threading.Event | None = None
 
-        self.linesToSend: queue.Queue[str] = queue.Queue()
+        self.linesToSend: queue.Queue[_QueuedCommand] = queue.Queue()
+        self.priorityLinesToSend: queue.Queue[_QueuedCommand] = queue.Queue()
         self.uiReceivedQueue: queue.Queue[str] = queue.Queue()
         self.uiSentQueue: queue.Queue[str] = queue.Queue()
         self._serial_write_lock = threading.Lock()
+        self._pending_ack_waiters: deque[threading.Event | None] = deque()
+        self._spooling_start_event = threading.Event()
 
         self.message_handler = message_handler or self._default_message_handler
         self.last_connect_error: str | None = None
@@ -153,6 +163,8 @@ class ComViewModel:
         self.comModel.OpRun = False
         self.comModel.Ack = 0
         self.linesToSend = queue.Queue()
+        self.priorityLinesToSend = queue.Queue()
+        self._pending_ack_waiters.clear()
         self._filament_dia_window.clear()
         self.Setting.values.ReadFDia = 0
         self.comModel.printerConnected = True
@@ -334,22 +346,23 @@ class ComViewModel:
             time.sleep(0.005)
 
     def SerialSender(self) -> None:
-        stringBuilder: list[str] = []
-        _ = stringBuilder
-
         while self.cancellationTokenSource is not None and not self.cancellationTokenSource.is_set():
-            current_queue = self.linesToSend
             try:
-                command = current_queue.get_nowait()
+                current_queue = self.priorityLinesToSend
+                queued_command = current_queue.get_nowait()
             except queue.Empty:
-                time.sleep(0.005)
-                continue
+                current_queue = self.linesToSend
+                try:
+                    queued_command = current_queue.get_nowait()
+                except queue.Empty:
+                    time.sleep(0.005)
+                    continue
 
             try:
-                self._write_serial(command)
+                self._write_serial(queued_command)
                 time.sleep(0.01)
             except Exception as ex:
-                Logger.Log(f"SerialSender exception while sending {command!r}: {ex}")
+                Logger.Log(f"SerialSender exception while sending {queued_command.text!r}: {ex}")
                 self.ComClose()
                 break
             finally:
@@ -371,6 +384,7 @@ class ComViewModel:
             return
 
         self.isSpoolingActive = False
+        self._spooling_start_event.clear()
         self._filament_dia_window.clear()
         self.Setting.values.ReadFDia = 0
         self._spooler_core_dia = self.Setting.values.SpoolerID
@@ -382,21 +396,13 @@ class ComViewModel:
         j = 0
         i = 0
         wc = self._initial_winder_direction()
-        self.SendImmediateCommand(self.Setting.commands.Winder, _format_command_value(self.Setting.values.WinderSpmm))
-        time.sleep(1.0)
-        self.SendImmediateCommand(self.Setting.commands.OpPreset)
-        time.sleep(1.0)
-        
-
-
-        while self.comModel.Ack > 0:
-            time.sleep(1.0)
-        self._wait_for_motion_complete()
+        self.SendCommand(self.Setting.commands.Winder, _format_command_value(self.Setting.values.WinderSpmm), immediate=True)
+        self.SendCommand(self.Setting.commands.OpPreset, immediate=True)
+        self._wait_for_serial_ack()
 
         self._move_winder_to_start_position()
-        self._wait_for_motion_complete()
-        self.SendImmediateCommand(self.Setting.commands.Winder, _format_command_value(self.WinderRPM))
-        self.SendImmediateCommand(self.Setting.commands.WinderSetPos, _format_command_value(self._starting_winder_zero_position()))
+
+        self._queue_winder_runtime_setup()
 
         while (
             self.comModel.OpRun
@@ -407,7 +413,7 @@ class ComViewModel:
             try:
                 self.Send(self._build_pre_spool_command())
                 self.Send(self.Setting.commands.FRead)
-                time.sleep(self.Setting.values.OpDelay / 1000.0)
+                self._spooling_start_event.wait(max(0.01, self.Setting.values.OpDelay / 1000.0))
             except Exception:
                 self.OpDisrupt()
                 return
@@ -415,9 +421,8 @@ class ComViewModel:
         if not self.comModel.OpRun or self.cancellationTokenSource is None or self.cancellationTokenSource.is_set():
             return
 
-        self._wait_for_motion_complete()
-        self.SendImmediateCommand(self.Setting.commands.Winder, _format_command_value(self.WinderRPM))
-        self.SendImmediateCommand(self.Setting.commands.WinderSetPos, _format_command_value(self._starting_winder_zero_position()))
+        self._spooling_start_event.clear()
+        self._queue_winder_runtime_setup()
 
         while self.comModel.OpRun and self.cancellationTokenSource is not None and not self.cancellationTokenSource.is_set():
             try:
@@ -454,11 +459,16 @@ class ComViewModel:
         self.isSpoolingActive = False
         self.comModel.Ack = 0
         self.linesToSend = queue.Queue()
+        self.priorityLinesToSend = queue.Queue()
+        self._pending_ack_waiters.clear()
+        self._spooling_start_event.clear()
 
         self.SendCommand(self.Setting.commands.StopMotion)
 
     def StartSpooling(self) -> None:
         self.isSpoolingActive = True
+        self.linesToSend = queue.Queue()
+        self._spooling_start_event.set()
     def _update_layer_counts(self, current_dia: float, filament_dia: float) -> None:
             current_dia = float(current_dia)
             filament_dia = float(filament_dia)
@@ -691,46 +701,76 @@ class ComViewModel:
         if self.serialPort is not None and self.serialPort.is_open:
             self.SendCommand(command)
 
-    def ParseCommand(self, command: str, value: str | float | int = "0") -> None:
+    def ParseCommand(
+        self,
+        command: str,
+        value: str | float | int = "0",
+        *,
+        immediate: bool = False,
+        wait_for_ack: bool = False,
+    ) -> list[threading.Event]:
         if len(command) < 2:
-            return
+            return []
         command = self.RemoveExcessiveGaps(command)
         if "{}" in command:
             command = command.replace("{}", _format_command_value(value))
-        self.linesToSend.put(command)
+        event = self.Send(command, immediate=immediate, wait_for_ack=wait_for_ack)
+        return [event] if event is not None else []
 
-    def SendCommand(self, command: str | None, value: str | float | int = "0") -> None:
+    def SendCommand(
+        self,
+        command: str | None,
+        value: str | float | int = "0",
+        *,
+        immediate: bool = False,
+        wait_for_ack: bool = False,
+    ) -> list[threading.Event]:
         if command is None:
-            return
+            return []
+        events: list[threading.Event] = []
         parts = command.split(",")
         if len(parts) == 1:
-            self.ParseCommand(command, value)
+            events.extend(self.ParseCommand(command, value, immediate=immediate, wait_for_ack=wait_for_ack))
         else:
             for part in parts:
-                self.ParseCommand(part, value)
+                events.extend(self.ParseCommand(part, value, immediate=immediate, wait_for_ack=wait_for_ack))
+        return events
 
     def SendImmediateCommand(self, command: str | None, value: str | float | int = "0") -> None:
-        self.SendCommand(command, value)
-        self._wait_until_serial_idle()
+        events = self.SendCommand(command, value, immediate=True, wait_for_ack=True)
+        self._wait_for_command_events(events)
 
     def ParseSend(self, command: str, value: str | float | int = "0") -> None:
         if "{}" in command:
             command = command.replace("{}", _format_command_value(value))
         self.Send(command)
 
-    def Send(self, command: str | None) -> None:
+    def Send(
+        self,
+        command: str | None,
+        *,
+        immediate: bool = False,
+        wait_for_ack: bool = False,
+    ) -> threading.Event | None:
         if self.serialPort is None or command is None:
-            return
-        self.linesToSend.put(command)
+            return None
+        ack_event = threading.Event() if wait_for_ack else None
+        queued_command = _QueuedCommand(command, ack_event=ack_event)
+        if immediate:
+            self.priorityLinesToSend.put(queued_command)
+        else:
+            self.linesToSend.put(queued_command)
+        return ack_event
 
-    def _write_serial(self, command: str | None) -> None:
-        if self.serialPort is None or not self.serialPort.is_open or command is None:
+    def _write_serial(self, queued_command: _QueuedCommand | None) -> None:
+        if self.serialPort is None or not self.serialPort.is_open or queued_command is None:
             return
         with self._serial_write_lock:
-            self.serialPort.write((command + "\n").encode("utf-8"))
+            self.serialPort.write((queued_command.text + "\n").encode("utf-8"))
             self.serialPort.flush()
+            self._pending_ack_waiters.append(queued_command.ack_event)
             self.comModel.Ack += 1
-            self.uiSentQueue.put(command)
+            self.uiSentQueue.put(queued_command.text)
 
     def SetNewPuller(self) -> None:
         filament_control = self.Setting.values.Puller
@@ -800,13 +840,22 @@ class ComViewModel:
     def _move_winder_to_start_position(self) -> None:
         if self._is_spooling_from_left():
             left_edge = self._left_winder_edge()
-            self.SendImmediateCommand(self.Setting.commands.Winder, _format_command_value(self.Setting.values.Winder))
-            self.SendImmediateCommand(self.Setting.commands.WinderMove, _format_command_value(left_edge))
-            self.SendImmediateCommand(self.Setting.commands.Winder, _format_command_value(self.Setting.values.WinderSpmm))
-            self.SendImmediateCommand(self.Setting.commands.WinderMove, _format_command_value(-round(self.Setting.values.WinderStart, 2)))
+            self.SendCommand(self.Setting.commands.Winder, _format_command_value(self.Setting.values.Winder), immediate=True)
+            self.SendCommand(self.Setting.commands.WinderMove, _format_command_value(left_edge), immediate=True)
+            self.SendCommand(self.Setting.commands.Winder, _format_command_value(self.Setting.values.WinderSpmm), immediate=True)
+            self.SendCommand(
+                self.Setting.commands.WinderMove,
+                _format_command_value(-round(self.Setting.values.WinderStart, 2)),
+                immediate=True,
+            )
+            self.SendImmediateCommand("M400")
             return
 
-        self.SendImmediateCommand(self.Setting.commands.WinderMove, _format_command_value(round(self.Setting.values.WinderStart, 2)))
+        self.SendCommand(
+            self.Setting.commands.WinderMove,
+            _format_command_value(round(self.Setting.values.WinderStart, 2)),
+            immediate=True,
+        )
 
     def _starting_winder_zero_position(self) -> float:
         if not self._is_spooling_from_left():
@@ -823,17 +872,41 @@ class ComViewModel:
             return 0.0
         return round(left_edge, 2)
 
-    def _wait_for_motion_complete(self) -> None:
-        self.SendImmediateCommand("M400")
+    def _wait_for_serial_ack(self, timeout: float = 30.0) -> None:
+        self._wait_until_serial_idle(timeout=timeout)
+
+    def _queue_winder_runtime_setup(self) -> None:
+        self.SendCommand(self.Setting.commands.Winder, _format_command_value(self.WinderRPM), immediate=True)
+        self.SendCommand(
+            self.Setting.commands.WinderSetPos,
+            _format_command_value(self._starting_winder_zero_position()),
+            immediate=True,
+        )
 
     def _wait_until_serial_idle(self, timeout: float = 30.0) -> None:
         end_time = time.monotonic() + timeout
         while time.monotonic() < end_time:
-            if self.linesToSend.unfinished_tasks == 0 and self.comModel.Ack <= 0:
+            if (
+                self.linesToSend.unfinished_tasks == 0
+                and self.priorityLinesToSend.unfinished_tasks == 0
+                and self.comModel.Ack <= 0
+            ):
                 return
             if self.cancellationTokenSource is not None and self.cancellationTokenSource.is_set():
                 return
             time.sleep(0.01)
+
+    def _wait_for_command_events(self, events: list[threading.Event], timeout: float = 10.0) -> None:
+        if not events:
+            return
+        end_time = time.monotonic() + timeout
+        for event in events:
+            remaining = end_time - time.monotonic()
+            if remaining <= 0:
+                return
+            if self.cancellationTokenSource is not None and self.cancellationTokenSource.is_set():
+                return
+            event.wait(remaining)
 
     def _is_spooling_from_left(self) -> bool:
         return str(self.Setting.values.SpoolingDirection).strip().lower() == "left"
@@ -852,6 +925,10 @@ class ComViewModel:
             return
         if _ACK_LINE_PATTERN.match(line) and self.comModel.Ack > 0:
             self.comModel.Ack -= 1
+            if self._pending_ack_waiters:
+                waiter = self._pending_ack_waiters.popleft()
+                if waiter is not None:
+                    waiter.set()
         self.uiReceivedQueue.put(line)
 
     @staticmethod

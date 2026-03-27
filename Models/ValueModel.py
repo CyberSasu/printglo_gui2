@@ -15,6 +15,24 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return value
 
 
+def _coerce_non_negative(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if math.isnan(number) or math.isinf(number):
+        return float(default)
+    return max(0.0, number)
+
+
+def _coerce_positive_int(value: Any, default: int = 1) -> int:
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
+    return max(1, number)
+
+
 class ValueModel:
     def __init__(self) -> None:
         self.PropertyChanged: list[Callable[[Any, str], None]] = []
@@ -248,7 +266,7 @@ class ValueModel:
     def WinderStart(self, value: float) -> None:
         value = float(value)
         if self._WinderStart != value:
-            self._WinderStart = _clamp(value, -float("inf"), float("inf"))
+            self._WinderStart = _clamp(value, 0, float("inf"))
             self.OnPropertyChanged("WinderStart")
 
     @property
@@ -331,33 +349,32 @@ class ValueModel:
         if not data:
             return model
 
-        simple_fields = [
-            "MinTemp",
-            "MaxTemp",
-            "PullerDia",
-            "Spmm",
-            "SpoolerSpmm",
-            "WinderSpmm",
-            "WinderPitch",
-            "WinderMax",
-            "WinderLimit",
-            "PullerP",
-            "PullerI",
-            "PullerD",
-            "PIDInterval",
-            "MinPID",
-            "MaxPID",
-            "IntegratorWindPID",
-            "K1",
-            "K2",
-            "dia_iState_fwidth",
-            "puller_increment",
-            "OpDelay",
-        ]
+        if "MinTemp" in data:
+            model.MinTemp = _coerce_non_negative(data["MinTemp"])
+        if "MaxTemp" in data:
+            model.MaxTemp = _coerce_non_negative(data["MaxTemp"])
+        if model.MaxTemp and model.MinTemp > model.MaxTemp:
+            model.MinTemp, model.MaxTemp = model.MaxTemp, model.MinTemp
 
-        for field_name in simple_fields:
-            if field_name in data:
-                setattr(model, field_name, data[field_name])
+        model.PullerDia = _coerce_non_negative(data.get("PullerDia", model.PullerDia))
+        model.Spmm = _coerce_non_negative(data.get("Spmm", model.Spmm))
+        model.SpoolerSpmm = _coerce_non_negative(data.get("SpoolerSpmm", model.SpoolerSpmm))
+        model.WinderSpmm = _coerce_non_negative(data.get("WinderSpmm", model.WinderSpmm))
+        model.WinderPitch = _coerce_non_negative(data.get("WinderPitch", model.WinderPitch))
+        model.PullerP = _coerce_non_negative(data.get("PullerP", model.PullerP))
+        model.PullerI = _coerce_non_negative(data.get("PullerI", model.PullerI))
+        model.PullerD = _coerce_non_negative(data.get("PullerD", model.PullerD))
+        model.PIDInterval = _coerce_positive_int(data.get("PIDInterval", model.PIDInterval or 1))
+        model.MinPID = _coerce_non_negative(data.get("MinPID", model.MinPID))
+        model.MaxPID = _coerce_non_negative(data.get("MaxPID", model.MaxPID))
+        if model.MaxPID and model.MinPID > model.MaxPID:
+            model.MinPID, model.MaxPID = model.MaxPID, model.MinPID
+        model.IntegratorWindPID = _coerce_non_negative(data.get("IntegratorWindPID", model.IntegratorWindPID))
+        model.K1 = _coerce_non_negative(data.get("K1", model.K1))
+        model.K2 = _coerce_non_negative(data.get("K2", model.K2))
+        model.dia_iState_fwidth = float(data.get("dia_iState_fwidth", model.dia_iState_fwidth) or 0.0)
+        model.puller_increment = _coerce_positive_int(data.get("puller_increment", model.puller_increment or 1))
+        model.OpDelay = _coerce_positive_int(data.get("OpDelay", model.OpDelay or 1), default=1)
 
         property_fields = [
             "TuningTemp",
@@ -370,7 +387,6 @@ class ValueModel:
             "Fan3",
             "Auger",
             "Winder",
-            "WinderMax",
             "Spooler",
             "WinderMax",
             "WinderLimit",
